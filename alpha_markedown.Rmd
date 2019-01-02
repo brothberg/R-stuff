@@ -1,0 +1,108 @@
+---
+title: "Risk Statistics"
+output: html_document
+params:
+  Asset:  'CSX'
+  Base:   'SPY'
+  Period:
+    label: "Period:"
+    value: Daily
+    input: select
+    choices: [Daily, Monthly, Yearly]
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+library(quantmod)
+library(dygraphs)
+library(dlm)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+### Note: All returns are excess returns, i.e. net of 3 month T-Bill rate.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, results='asis', tidy=TRUE}
+
+# Get the stocks from Yahoo
+  myEnv <- new.env()
+  getSymbols(c( params$Asset, params$Base, params$`Risk Free Rate` ), from = '1990-01-01', env = myEnv)
+# assertthat.a <- adjustOHLC(asset, adjust = 'dividend')
+  MainXTS <- do.call(merge.xts, c(eapply(myEnv, Ad),all=FALSE))
+  getSymbols('DGS3MO', from = '1990-01-01', src = 'FRED')
+  MainXTS <- merge(MainXTS, DGS3MO, all=F)
+  MainXTS <- na.omit(MainXTS)
+ 
+# set up the returns (net of risk free) for the regression and graphs  
+  periodDum   <- tolower(params$Period)
+  voFactor <- 0
+  asset_return <- periodReturn( MainXTS[,1], period = periodDum )
+  base_return <- periodReturn( MainXTS[,2], period = periodDum)
+  risk_free_rate <- MainXTS[,3] / 100 + 1
+  if (periodDum == 'daily')   voFactor <- 255
+  if (periodDum == 'monthly') voFactor <- 12
+  if (periodDum == 'yearly') voFactor <- 1  
+  risk_free_rate <- risk_free_rate ^( 1 / voFactor) - 1
+  asset_return <- asset_return - risk_free_rate
+  base_return <- base_return - risk_free_rate
+ 
+# output the number of trading days  
+  textDum <- paste("Number of Trading Days is ",length(MainXTS[,1]))
+  cat(paste("  \n", textDum), "  \n")
+  
+   
+  
+  reg <- lm( asset_return ~ base_return )
+  beta <- reg$coeff[2]
+ 
+  alpha <- cumprod(1 + (asset_return - beta * base_return))
+  cat( paste( 'Beta is ', format(beta, digits = 2 ), "  \n" ) )
+  dumm <- lm( tail(asset_return,100) ~ tail(base_return,100) )
+  cat( paste("Beta of Last 100 Days is", format(dumm$coeff[2], digits = 3), "  \n") )
+  annAlpha <- as.numeric( tail( alpha,1 ) )
+  annAlpha <- annAlpha ^ (255/length(MainXTS[,1]))
+  gg=as.numeric(tail(MainXTS[,1],1)) / as.numeric(head(MainXTS[,1],1))
+  cat( paste( 'Annualized Total Return',  format( gg ^ (255/length(MainXTS[,1]))-1,digits = 4 ), "  \n" ) )
+  cat(paste( 'Annualized Alpha', format(annAlpha-1, digits = 4), "  \n" ) )
+  cat( paste( 'Ending Cumulative Alpha is', format(tail(alpha,1),digits = 4), "  \n" ) )
+  assetHist <- sd(asset_return)*sqrt(voFactor)
+  baseHist  <- sd(base_return)*sqrt(voFactor)
+  cat( paste( 'Daily Historical Volatility is', format(assetHist, digits = 4), "  \n" ) )
+  cat( paste( 'Daily Historical Volatility of BaseAsset is', format(baseHist, digits = 4), "  \n" ) )
+  cat( paste( 'Daily Historical Volatility of Last 100 Points is', 
+                format(sd(tail(asset_return,100))*sqrt(255), digits = 4), "  \n" ) )
+```
+
+```{r, fig.height=7, fig.width=9}
+# Calculate and plot relative prices
+relAsset <- cumprod(1+asset_return)
+relBase  <- cumprod(1+base_return)
+relDumm  <- cbind(relAsset, relBase)
+title = paste('Cumulative Returns of', params$Asset, 'and', params$Base, collapse='   ')
+dygraph(relDumm, main = title) %>% 
+      dyAxis('y', logscale=TRUE)
+# Plot the cumulative alpha
+title = paste('Cumulative Alpha', params$Asset, 'versus', params$Base, collapse='   ')
+dygraph(alpha, main = title) %>% 
+      dyAxis('y', logscale=TRUE)
+# Plot the time-varying beta using state a space model
+m <- 1  # number of independent variables
+CAPM <- dlmModReg(base_return)
+CAPM$FF <- CAPM$FF %x% diag(m)
+CAPM$GG <- CAPM$GG %x% diag(m)
+CAPM$JFF <- CAPM$JFF %x% diag(m)
+CAPM$W <- CAPM$W %x% matrix(0,m,m)
+signal.to.noise.ratio <- .9 # s/n = W / V
+CAPM$V <- cov(asset_return)
+CAPM$W[-(1:m),-(1:m)] <- cov(asset_return) * signal.to.noise.ratio
+CAPM$m0 <- rep(0,2*m)
+CAPM$C0 <- diag(1e7,nr=2*m)
+
+CAPMsmooth <- dlmSmooth(asset_return,CAPM)
+smooth.zoo <- zoo(CAPMsmooth$s[2:nrow(CAPMsmooth$s),m+1:m],time(asset_return))
+title <- paste( 'DLM Rolling Beta of ', params$Asset, 'Versus ', params$Base)
+dygraph(smooth.zoo, main = title)
+```
+
+
+
